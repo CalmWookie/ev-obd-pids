@@ -36,8 +36,83 @@ These are kept out to keep the poll cycle short. A separate diagnostic profile c
 
 ### Not on OBD for this car
 
-- `is_charging` — ECU `0x700` DID `FD03` was a candidate (`0x00`=charging, `0x40`=idle) but live verification showed it flipping spuriously on door-open events. **Not reliable for telemetry — omitted from this profile.** A correct charging flag presumably lives on body-CAN behind the SVDC gateway.
-- `batt_temp` aggregate — `22F254`/`F255` return single bytes whose raw values vary widely (8-112) while the displayed temperature stays stable (18-22 °C), implying a vendor lookup table rather than a linear formula.
-- `soh` — dashboard shows SOCE 100 % but no live DID identified on the ECU set explored so far.
+- `is_charging` and `plug_detected` — exhaustively searched and **not exposed
+  via OBD-II**. Search trail:
+  1. All 192 named PIDs in the OEM/aftermarket "Mazda EZ-6 / 6e" profile
+     used by Car Scanner Pro were enumerated by decoding the PID-definition
+     records in the iOS `.brc` recording binary. No name matches
+     `Charging`, `Plug`, `Cable`, `EVSE`, `Port`, `Pre-cond`, `HVAC`, or
+     `Cabin`.
+  2. The full SAE J1979-2 / WWH-OBD standardised DID set (`22F40C`,
+     `22F40D`, `22F411`, `22F412`, `22F45B`, `22F47x`, `22F80C`-`22F81F`,
+     etc. — 68 DIDs total) was probed against the BMS at `7A1/7A9` in
+     default session. **Every single one returned NO_DATA — not even a
+     UDS negative response.** The BMS UDS handler is whitelisted to its
+     proprietary `F22x` / `F25x` / `F2xx` / `F3xx` range only.
+  3. ECU header discovery against 70 candidate 11-bit IDs surfaced one
+     extra live ECU at `0x754 / 0x75C` — the VCU. A 1789-DID wide sweep
+     across F2/F3/F4/FC/FD/FE/FF on this ECU returned 22 hits, of which
+     six were boolean / counter candidates (`F1F7`, `FECA`, `FEF6`,
+     `FEF9`, `FEFA`, `FD0C`). A live 4-state delta capture (parked
+     unplugged → plugged not charging → AC 4.2 kW charging → cable
+     physically unplugged) showed every candidate bit-identical across
+     all four states. They are firmware build-time constants, not live
+     state.
+  4. Earlier `0x700` DID `0xFD03` candidate (`0x00`=charging, `0x40`=idle)
+     produced clean transitions but during a 190-tick live verification
+     drive flipped 13 times on door-open events — it is a body-network
+     wake-source bit, not a charging flag.
+
+  ABRP / any telemetry consumer must therefore **derive `is_charging`
+  from current sign**: `is_charging = (pack_I_A < -1) sustained 5 s`.
+  The negative-equals-into-pack convention is confirmed by direct
+  measurement: `F229` raw 5904-5921 during a 4.2 kW AC charge
+  (`(raw - 6000) / 10 = -8.4 to -9.6 A`) versus 6024-6033 during the
+  immediately following idle drain (`+2.4 to +3.3 A`). Matches the
+  car's spec at 247 V × 17 A × ~93 % charger efficiency = ~9.7 A into
+  pack at 404 V.
+- `batt_temp` aggregate — `22F254`/`F255` return single bytes whose raw values vary widely (8-112) while the displayed temperature stays stable (18-22 °C), implying a vendor lookup table rather than a linear formula. A v2 of this profile should expose `batt_temp = mean(22F1B0..F1B7, 22F2F0..F2FF, raw − 40)` — the per-module formula is proven across all 24 active probes.
+- `soh` — no DID identified on either BMS (`7A1`) or VCU (`0x754`).
+  Standardised candidate `22F412` returns NO_DATA on every ECU probed
+  so far. Dashboard shows SOCE 100 % at present; revisit when the pack
+  has measurable degradation.
 - `est_battery_range` — no OBD-reachable DID matches the dashboard value.
-- HVAC state / setpoint, TPMS, cabin temp — live on body-CAN behind the SVDC gateway; not reachable via the OBD port without a mid-bus tap.
+  Let ABRP derive server-side from `soe + avg kWh/km`.
+- HVAC state / setpoint, TPMS, cabin temp — live on body-CAN behind the
+  SVDC gateway; not reachable via the OBD port without a mid-bus tap.
+
+### Multi-ECU header switching — known limitation in the OBD App layer
+
+This profile polls three distinct ECUs each tick (broadcast `7DF` for
+Mode 01 PIDs, `7A1/7A9` for BMS proprietary, `7E2/7EA` for HPCM
+proprietary). On some ELM327 + integration combinations we have observed
+`22F228` / `22F229` returning NO_DATA in the ABRP UI despite the same
+queries working consistently from a standalone Python probe. The pattern
+is:
+
+- SoC (`22F1AF` on `7EA`) loads correctly.
+- Odometer (`22F1AE` on `7EA`) loads correctly.
+- Pack voltage / current (`22F228`/`22F229` on `7A9`) report NO_DATA.
+
+Root cause appears to be that the OBD App plugin sends `Data_Commands`
+once at session start, then per-tick only emits the `command` field and
+an `ATCRA<ecu>` from each PID definition — it does **not** automatically
+issue a fresh `ATSH<tx>` per PID. The last `ATSH` from the init / data
+sequence wins, so requests for BMS DIDs go out with the HPCM (or
+broadcast) header active and the BMS does not answer.
+
+Mitigations, in increasing order of effort:
+
+1. Verify that the ABRP UI accepts `Data_Commands` as a per-tick
+   sequence (not a one-shot init). If it does, the order shown in the
+   JSON here is sufficient.
+2. If your build of the OBD App exposes a separate "TX header" field
+   per PID, set it to `7A1` for `22F228` / `22F229` (and `7E2` for
+   `22F1AE` / `22F1AF`).
+3. As a last resort, override the `ecu` field with the TX header rather
+   than the RX header (some integrations interpret `ecu` as TX). E.g.
+   change `"ecu": "7A9"` to `"ecu": "7A1"` for the BMS DIDs.
+
+Verified working on a Python+BLE control run (see the upstream
+research repo) — the limitation is in the consuming integration, not
+in the DIDs themselves.
