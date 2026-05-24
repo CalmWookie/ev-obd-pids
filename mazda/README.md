@@ -13,9 +13,10 @@ Reverse-engineered from a 2026 Mazda 6e (VIN prefix `LVRHDA...`) over a VLink BL
 | `soc` | `22F1AF` on HPCM (RX `7EA`) | `(A<<8\|B)/10` % | drops monotonically with energy use; 1 % over ~3 km matches 68.8 kWh × consumption rate |
 | `voltage` | `22F228` on BMS (RX `7A9`) | `(A<<8\|B)/10` V | range 370.6 V (sag under peak discharge) — 404.2 V (rest) |
 | `current` | `22F229` on BMS | `((A<<8\|B)-6000)/10` A | range −231.6 A (regen) / +515.6 A (acceleration); positive = discharge / negative = regen — matches ABRP convention |
-| `ext_temp` | `0146` Mode 01 | `A-40` °C | stable 22-24 °C vs dashboard |
-| `vehicle_reported_speed` | `010D` Mode 01 | `A` km/h | 0-79 km/h tracked across drive |
 | `odometer` | `22F1AE` on HPCM | `(A<<24\|B<<16\|C<<8\|D)/10` km | monotonic increase, tracks dashboard within rounding |
+
+Speed comes from the phone GPS (the standard ABRP behaviour). Ext temp is
+omitted — see "Not on OBD App" below.
 
 ### Derived sanity check (not posted to ABRP — included here for verification)
 
@@ -80,6 +81,38 @@ These are kept out to keep the poll cycle short. A separate diagnostic profile c
   Let ABRP derive server-side from `soe + avg kWh/km`.
 - HVAC state / setpoint, TPMS, cabin temp — live on body-CAN behind the
   SVDC gateway; not reachable via the OBD port without a mid-bus tap.
+
+### Not on OBD App (Mode 01 PIDs unsupported by the parser)
+
+Mazda 6e exposes vehicle speed via standard SAE J1979 Mode 01 PID `0x0D`
+and ambient temperature via PID `0x46`. We have raw-confirmed both on
+the wire (`7EA 03 41 0D 00` for speed = 0 km/h parked; `7EA 03 41 46 41`
+for ambient = `0x41 − 40 = 25 °C`). However, when these PIDs are added
+to a profile and consumed by the ABRP OBD App, both consistently report
+`failed to parse response / got response null`, even though the raw
+bytes are visibly received by the integration. Cross-checking against
+all 12 other EV profiles in this repository: **none of them uses any
+Mode 01 PIDs** — every working profile reads its values exclusively via
+Mode 22 UDS DIDs. The empirical conclusion is that the obdble parser in
+the ABRP OBD App layer only decodes `62 …` (Mode 22 positive) responses
+correctly and does not handle `41 …` (Mode 01 positive) responses.
+
+For the Mazda 6e profile we therefore ship four Mode 22 fields only.
+Speed gets picked up from the phone GPS (the standard ABRP fallback)
+and `power` / `is_charging` / `is_dcfc` / `is_parked` / `soe` are
+derived server-side from `voltage × current` + GPS speed.
+
+If a Mode 01-capable variant of the parser becomes available, the two
+omitted PIDs can be re-added trivially:
+
+```json
+"speed":    { "command": "010D", "ecu": "7EA", "equation": "A",      "type": "Number", "minValue": 0,   "maxValue": 250 },
+"ext_temp": { "command": "0146", "ecu": "7EA", "equation": "A-40",   "type": "Number", "minValue": -40, "maxValue": 80  }
+```
+
+with `ATSH7DF` + `ATCRA7EA` + `010D` + `0146` prepended to
+`data_commands`. Both have been verified to read cleanly from a
+standalone Python+BLE probe on the same adapter and car.
 
 ### Multi-ECU header switching — known limitation in the OBD App layer
 

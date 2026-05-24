@@ -9,25 +9,22 @@
             "ATM0",
             "ATAT1",
             "ATAL",
-            "ATST64",
+            "ATSTFF",
+            "ATFE",
             "ATSP6"
         ]
     },
     "obd_protocol": "6",
     "data_commands": {
         "command": [
-            "ATSH7DF",
-            "ATCRA",
-            "010D",
-            "0146",
-            "ATSH7A1",
-            "ATCRA7A9",
-            "22F228",
-            "22F229",
             "ATSH7E2",
             "ATCRA7EA",
             "22F1AE",
-            "22F1AF"
+            "22F1AF",
+            "ATSH7A1",
+            "ATCRA7A9",
+            "22F228",
+            "22F229"
         ]
     },
     "soc": {
@@ -53,22 +50,6 @@
         "type": "Number",
         "minValue": -300,
         "maxValue": 600
-    },
-    "ext_temp": {
-        "command": "0146",
-        "ecu": "7EA",
-        "equation": "A-40",
-        "type": "Number",
-        "minValue": -40,
-        "maxValue": 80
-    },
-    "vehicle_reported_speed": {
-        "command": "010D",
-        "ecu": "7EA",
-        "equation": "A",
-        "type": "Number",
-        "minValue": 0,
-        "maxValue": 250
     },
     "odometer": {
         "command": "22F1AE",
